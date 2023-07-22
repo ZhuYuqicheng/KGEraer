@@ -69,18 +69,31 @@ def unlearning(args, deletion_mode, n_del, degree_set=None, repeat=1, save_model
         # run unlearning training
         unlearner = UnlearnPipeline(args, model_dir, console, data)
         initial_model = unlearner.train_model(args, "initial")
-        initial_embedding = initial_model.entity.weight.data.cpu().numpy()
+        initial_entity_embedding = initial_model.entity.weight.data.cpu().numpy()
+        initial_rel_embedding = initial_model.rel.weight.data.cpu().numpy()
         logging.info(f"----------------------- initial model -----------------------------")
         test_metrics = avg_both(*initial_model.compute_metrics(data["test_examples"], data["filters"]))
         logging.info(format_metrics(test_metrics, split="test"))
-        retrained_embeddings = []
+        retrained_entity_embeddings = []
+        retrained_rel_embeddings = []
+        # entity_distances, rel_distances = [], []
         for _ in range(5):
-            model = unlearner.train_model(args, "finetune", initial_model=initial_model)
+            # model = unlearner.train_model(args, "finetune", initial_model=initial_model)
+            model = unlearner.train_model(args, "finetune", initial_model=initial_model, fix_rel=True)
             logging.info(f"----------------------------------------------------")
             test_metrics = avg_both(*model.compute_metrics(data["test_examples"], data["filters"]))
             logging.info(format_metrics(test_metrics, split="test"))
-            retrained_embeddings.append(model.entity.weight.data.cpu().numpy())
-        return initial_embedding, retrained_embeddings, data["deleted_triples"]
+            retrained_entity_embedding = model.entity.weight.data.cpu().numpy()
+            retrained_rel_embedding = model.rel.weight.data.cpu().numpy()
+            retrained_entity_embeddings.append(retrained_entity_embedding)
+            retrained_rel_embeddings.append(retrained_rel_embedding)
+            # distance evaluation
+            # entity_distances.append(torch.sum(torch.square(initial_model.entity.weight.data - model.entity.weight.data), dim=1).cpu())
+            # rel_distances.append(torch.sum(torch.square(initial_model.rel.weight.data - model.rel.weight.data), dim=1).cpu())
+        # logging.info(f"----------------------- distance evaluation -----------------------------")
+        # logging.info(f"")
+        
+        return initial_entity_embedding, initial_rel_embedding, retrained_entity_embeddings, retrained_rel_embeddings, data["deleted_triples"]
 
 if __name__ == "__main__":
     pwd = os.getcwd()
@@ -89,12 +102,12 @@ if __name__ == "__main__":
     args = argparse.Namespace(
         dataset = "Nations", # "FB15K", "WN", "WN18RR", "FB237", "YAGO3-10"
         model = "TransE", # TransE, RotE; ComplEx, RotatE
-        regularizer = "N3",
-        reg = 0, 
+        regularizer = "N3", # N3 or F2
+        reg = .1, 
         optimizer = "Adam", 
-        max_epochs = 20, 
-        patience = 20, 
-        valid = 20,
+        max_epochs = 500, 
+        patience = 500, 
+        valid = 500,
         rank = 2, 
         batch_size = 1000, 
         neg_sample_size = -1, 
@@ -108,29 +121,50 @@ if __name__ == "__main__":
         debug = False, 
         multi_c = False,
         device = "cuda:2",
-        random_seed = 0
+        random_seed = 3
     )
 
-    initial_embedding, retrained_embeddings, deleted_triple = unlearning(args, "random", 100)
+    initial_entity_embedding, initial_rel_embedding, retrained_entity_embeddings, retrained_rel_embeddings, deleted_triple = \
+        unlearning(args, "random", 1)
 
 # 
 entity_list = ["egypt","china","cuba","netherlands","india","usa","jordan","burma","brazil","indonesia","poland","uk","ussr","israel"]
 entity_df = pd.read_pickle("/workspace/LLKGE/KGEmb/data/Nations/entity_dist.pkl")
-sizes = entity_df.sort_values(by="entities")["count"].to_list()
+entity_sizes = entity_df.sort_values(by="entities")["count"].to_list()
+rel_df = pd.read_pickle("/workspace/LLKGE/KGEmb/data/Nations/relation_dist.pkl")
+rel_sizes = rel_df.sort_values(by="relation")["count"].to_list()
 deleted_entities = [entity_list[deleted_triple.numpy()[0,0]], entity_list[deleted_triple.numpy()[0,2]]]
 
 plt.figure(figsize=(12, 10))
-plt.scatter(initial_embedding[:,0], initial_embedding[:,1], s=sizes)
+plt.scatter(initial_entity_embedding[:,0], initial_entity_embedding[:,1], s=entity_sizes)
+# plt.scatter(initial_entity_embedding[:,0], initial_entity_embedding[:,1])
 for i, entity in enumerate(entity_list):
-    plt.annotate(entity, (initial_embedding[i,0], initial_embedding[i,1]), textcoords="offset points", xytext=(0,0), ha='center')
-plt.annotate(deleted_entities[0], (initial_embedding[deleted_triple.numpy()[0,0],0], initial_embedding[deleted_triple.numpy()[0,0],1]), textcoords="offset points", xytext=(0,0), ha='center', color="red")
-plt.annotate(deleted_entities[1], (initial_embedding[deleted_triple.numpy()[0,2],0], initial_embedding[deleted_triple.numpy()[0,2],1]), textcoords="offset points", xytext=(0,0), ha='center', color="red")
+    plt.annotate(entity, (initial_entity_embedding[i,0], initial_entity_embedding[i,1]), textcoords="offset points", xytext=(0,0), ha='center', fontsize=14)
+plt.annotate(deleted_entities[0], (initial_entity_embedding[deleted_triple.numpy()[0,0],0], initial_entity_embedding[deleted_triple.numpy()[0,0],1]), 
+             textcoords="offset points", xytext=(0,0), ha='center', color="red", fontsize=14)
+plt.annotate(deleted_entities[1], (initial_entity_embedding[deleted_triple.numpy()[0,2],0], initial_entity_embedding[deleted_triple.numpy()[0,2],1]), 
+             textcoords="offset points", xytext=(0,0), ha='center', color="red", fontsize=14)
 for show_ind in range(5):
-    plt.scatter(retrained_embeddings[show_ind][:,0], retrained_embeddings[show_ind][:,1])
+    plt.scatter(retrained_entity_embeddings[show_ind][:,0], retrained_entity_embeddings[show_ind][:,1])
     # draw arrows
-    for i in range(len(initial_embedding)):
-        x1, y1 = initial_embedding[i]
-        x2, y2 = retrained_embeddings[show_ind][i]
+    for i in range(len(initial_entity_embedding)):
+        x1, y1 = initial_entity_embedding[i]
+        x2, y2 = retrained_entity_embeddings[show_ind][i]
+        dx = x2 - x1
+        dy = y2 - y1
+        plt.arrow(x1, y1, dx, dy, width=1e-5, head_width=2e-4, color="grey", length_includes_head=True)
+
+plt.show()
+
+# 
+plt.figure(figsize=(12, 10))
+plt.scatter(initial_rel_embedding[:,0], initial_rel_embedding[:,1])
+for show_ind in range(5):
+    plt.scatter(retrained_rel_embeddings[show_ind][:,0], retrained_rel_embeddings[show_ind][:,1])
+    # draw arrows
+    for i in range(len(initial_rel_embedding)):
+        x1, y1 = initial_rel_embedding[i]
+        x2, y2 = retrained_rel_embeddings[show_ind][i]
         dx = x2 - x1
         dy = y2 - y1
         plt.arrow(x1, y1, dx, dy, width=1e-5, head_width=2e-4, color="grey", length_includes_head=True)
